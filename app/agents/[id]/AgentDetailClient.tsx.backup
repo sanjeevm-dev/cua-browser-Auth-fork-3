@@ -1,0 +1,904 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  ArrowLeft,
+  Play,
+  Pause,
+  Clock,
+  Calendar,
+  Globe,
+  Brain,
+  Activity,
+  FileText,
+  Settings,
+  CheckCircle,
+  XCircle,
+  AlertCircle,
+  ChevronDown,
+  Monitor,
+  Loader2,
+} from "lucide-react";
+import type { Agent, AgentSession, AgentContextItem } from "../../../shared/schema";
+import SessionViewer from "../../components/SessionViewer";
+import MemoryViewer from "../../components/MemoryViewer";
+import AuditLogsViewer from "../../components/AuditLogsViewer";
+import LivePreviewSplit, { LiveStep } from "../../components/LivePreviewSplit";
+import WorkflowPlan from "../../components/WorkflowPlan";
+import { SessionLog } from "../../utils/stepFormatter";
+
+interface AgentTask {
+  id: number;
+  taskDescription: string;
+  taskType: string;
+  priority: number;
+  frequency: string;
+  status: string;
+  result?: unknown;
+  scheduledFor?: Date | null;
+  completedAt?: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface AgentWithRelations extends Agent {
+  sessions?: AgentSession[];
+  context?: AgentContextItem[];
+  tasks?: AgentTask[];
+}
+
+type TabType = "overview" | "livepreview" | "workflow" | "sessions" | "memory" | "audit";
+
+interface AgentDetailClientProps {
+  initialAgent: Agent;
+  initialSessions: AgentSession[];
+  initialContext: AgentContextItem[];
+  initialTasks: AgentTask[];
+}
+
+export default function AgentDetailClient({
+  initialAgent,
+  initialSessions,
+  initialContext,
+  initialTasks
+}: AgentDetailClientProps) {
+  const router = useRouter();
+  const agentId = initialAgent.id;
+
+  const [agent, setAgent] = useState<AgentWithRelations>({
+    ...initialAgent,
+    sessions: initialSessions,
+    context: initialContext,
+  });
+  const [tasks, setTasks] = useState<AgentTask[]>(initialTasks);
+  const [activeTab, setActiveTab] = useState<TabType>("workflow");
+  const [selectedSession, setSelectedSession] = useState<AgentSession | null>(null);
+  const [showLiveExecution, setShowLiveExecution] = useState(false);
+  const [runningSession, setRunningSession] = useState<AgentSession | null>(null);
+  const [expandedTaskId, setExpandedTaskId] = useState<number | null>(null);
+  const [liveViewUrl, setLiveViewUrl] = useState<string | null>(null);
+  const [liveSteps, setLiveSteps] = useState<LiveStep[]>([]);
+  const [isDeploying, setIsDeploying] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [deploymentStartTime, setDeploymentStartTime] = useState<number | null>(null);
+
+  useEffect(() => {
+    // Check for running session on mount
+    const running = initialSessions.find(s => s.status === 'running');
+    setRunningSession(running || null);
+    
+    if (running && running.browserSessionId) {
+      fetchLiveViewUrl(running.browserSessionId);
+    }
+  }, [initialSessions]);
+
+  // Safety timeout: if deployment takes longer than 2 minutes without browser session, clear deploying state
+  useEffect(() => {
+    if (isDeploying && deploymentStartTime) {
+      const timeout = setTimeout(() => {
+        // If still deploying after 2 minutes and no browser session, clear the deploying state
+        if (isDeploying && !runningSession?.browserSessionId) {
+          console.error('Deployment timeout: Browser session not created after 2 minutes');
+          setIsDeploying(false);
+          setDeploymentStartTime(null);
+        }
+      }, 120000); // 2 minutes
+
+      return () => clearTimeout(timeout);
+    }
+  }, [isDeploying, deploymentStartTime, runningSession?.browserSessionId]);
+
+  // Polling mechanism to fetch updates every 3 seconds
+  useEffect(() => {
+    const pollForUpdates = async () => {
+      try {
+        // Fetch agent details with sessions
+        const response = await fetch(`/api/agents/${agentId}`);
+        if (response.ok) {
+          const data = await response.json();
+          
+          // Only update state if we have fresh sessions data
+          if (data.sessions) {
+            // Update agent state with new data and sessions
+            setAgent(prevAgent => ({
+              ...prevAgent,
+              ...data.agent,
+              sessions: data.sessions,
+              context: data.context || prevAgent.context
+            }));
+            
+            // Check for running session
+            const running = data.sessions.find((s: AgentSession) => s.status === 'running');
+            
+            if (running) {
+              // Only update if session ID or browserSessionId changed
+              setRunningSession(prevSession => {
+                if (!prevSession || prevSession.id !== running.id || prevSession.browserSessionId !== running.browserSessionId) {
+                  // Fetch live view URL when browserSessionId becomes available
+                  if (running.browserSessionId) {
+                    fetchLiveViewUrl(running.browserSessionId);
+                  }
+                  return running;
+                }
+                return prevSession;
+              });
+              
+              // Clear deploying state once we have a browser session
+              if (running.browserSessionId) {
+                setIsDeploying(false);
+                setDeploymentStartTime(null);
+              }
+
+              // Fetch session logs for the running session
+              try {
+                const logsResponse = await fetch(`/api/sessions/${running.id}`);
+                if (logsResponse.ok) {
+                  const logsData = await logsResponse.json();
+                  if (logsData.session && logsData.session.logs) {
+                    // Logs are already formatted in user-friendly language from the backend
+                    const formattedSteps: LiveStep[] = logsData.session.logs.map((log: SessionLog) => {
+                      // Use pre-formatted data from database
+                      return {
+                        stepNumber: log.stepNumber,
+                        tool: log.tool || 'ACTION',
+                        text: log.instruction || 'Performing action',
+                        reasoning: log.reasoning || ''
+                      };
+                    });
+                    
+                    setLiveSteps(formattedSteps);
+                  }
+                }
+              } catch (logError) {
+                console.error('Error fetching session logs:', logError);
+              }
+            } else {
+              // No running session - clear running session state and live steps
+              setRunningSession(prevSession => {
+                if (prevSession) {
+                  setLiveViewUrl(null);
+                  setLiveSteps([]);
+                  return null;
+                }
+                return prevSession;
+              });
+              // Don't clear isDeploying here - let it stay true until browser session is ready
+              // isDeploying will be cleared when browserSessionId is detected (line 137)
+              // or when user explicitly pauses the agent
+              // Also clear live steps even if there was no previous running session
+              setLiveSteps([]);
+            }
+          } else {
+            // No sessions in response - only update agent fields, preserve sessions/context
+            setAgent(prevAgent => ({
+              ...prevAgent,
+              ...data.agent,
+              // Explicitly preserve sessions and context from previous state
+              sessions: prevAgent.sessions,
+              context: prevAgent.context
+            }));
+          }
+          // If data.sessions is null/undefined, all session-related state is preserved
+        }
+        
+        // Fetch tasks
+        const tasksResponse = await fetch(`/api/agents/${agentId}/tasks`);
+        if (tasksResponse.ok) {
+          const tasksData = await tasksResponse.json();
+          setTasks(tasksData.tasks || []);
+        }
+      } catch (error) {
+        console.error('Error polling for updates:', error);
+      }
+    };
+
+    // Poll immediately on mount, then every 3 seconds
+    pollForUpdates();
+    const interval = setInterval(pollForUpdates, 3000);
+
+    return () => clearInterval(interval);
+  }, [agentId]);
+
+  const fetchLiveViewUrl = async (browserSessionId: string) => {
+    try {
+                          // Parse coordinates from instruction like "click(391,317)"
+                          const clickMatch = log.instruction.match(/click\((\d+),\s*(\d+)\)/);
+                          if (clickMatch) {
+                            text = `Clicking at position (${clickMatch[1]}, ${clickMatch[2]})`;
+                          } else {
+                            text = 'Clicking on an element';
+                          }
+                          reasoning = 'Selecting an interactive element to interact with the page interface. This helps navigate through the content to find the requested information.';
+                          break;
+                          
+                        case 'TYPE':
+                          text = `Typing text: "${log.instruction}"`;
+                          const truncated = log.instruction.length > 15 ? `${log.instruction.substring(0, 15)}...` : log.instruction;
+                          reasoning = `Typing "${truncated}" to provide input needed for this search. This text will help narrow down the results to find the specific information requested.`;
+                          break;
+                          
+                        case 'KEYPRESS':
+                          text = `Pressing keys: ${log.instruction}`;
+                          if (log.instruction.includes('ENTER')) {
+                            reasoning = `Submitting the search query to find information about ${goal || 'the requested topic'}. This will execute the search and retrieve relevant results.`;
+                          } else {
+                            reasoning = 'Using keyboard input to efficiently interact with the page. This keyboard interaction helps streamline the navigation process.';
+                          }
+                          break;
+                          
+                        case 'SCROLL':
+                          const scrollMatch = log.instruction.match(/scroll\(([-\d]+),\s*([-\d]+)\)/);
+                          if (scrollMatch) {
+                            text = `Scrolling by (${scrollMatch[1]}, ${scrollMatch[2]})`;
+                          } else {
+                            text = 'Scrolling the page';
+                          }
+                          reasoning = `Scrolling to view additional content that might contain the requested information about ${goal || 'the topic'}. Scrolling allows examining more search results or content.`;
+                          break;
+                          
+                        case 'GOTO':
+                        case 'NAVIGATE':
+                          const url = log.instruction.replace('goto(', '').replace(')', '');
+                          text = `Navigating to ${url}`;
+                          reasoning = `Navigating to find information about ${goal || 'the requested topic'}. This website likely contains relevant data or search capabilities needed.`;
+                          break;
+                          
+                        case 'WAIT':
+                          text = 'Waiting for page to respond';
+                          reasoning = 'Waiting for page to respond while the page loads the requested information. This ensures all content is properly displayed before proceeding.';
+                          break;
+                          
+                        case 'NAVBACK':
+                        case 'BACK':
+                          text = 'Going back to the previous page';
+                          reasoning = 'Going back to return to previous content. This helps with navigation when the current page doesn\'t contain the needed information.';
+                          break;
+                          
+                        case 'SCREENSHOT':
+                          text = 'Taking screenshot';
+                          reasoning = 'Taking a screenshot to capture the visual information displayed. This preserves the current state of the information for reference.';
+                          break;
+                          
+                        case 'MESSAGE':
+                          text = log.instruction;
+                          reasoning = `Communicating about ${goal || 'the requested information'}. This exchange helps clarify needs and provide appropriate information.`;
+                          break;
+                          
+                        case 'COMPUTER_USE':
+                        case 'COMPUTER_USE_PREVIEW':
+                          // Parse the output field to get the actual action details
+                          if (log.output && typeof log.output === 'object') {
+                            const outputObj = log.output as Record<string, unknown>;
+                            const action = (outputObj.action as Record<string, unknown>) || outputObj;
+                            const actionType = (action.type as string | undefined)?.toLowerCase();
+                            
+                            switch (actionType) {
+                              case 'click':
+                                text = `Clicking at position (${(action.x as number) || 0}, ${(action.y as number) || 0})`;
+                                reasoning = 'Selecting an interactive element to interact with the page interface. This helps navigate through the content to find the requested information.';
+                                break;
+                              case 'type':
+                                text = `Typing text: "${(action.text as string) || ''}"`;
+                                const typeText = (action.text as string) || '';
+                                const typeTruncated = typeText.length > 15 ? `${typeText.substring(0, 15)}...` : typeText;
+                                reasoning = `Typing "${typeTruncated}" to provide input needed for this search. This text will help narrow down the results to find the specific information requested.`;
+                                break;
+                              case 'keypress':
+                              case 'key':
+                                const keys = Array.isArray(action.keys) ? (action.keys as string[]).join(', ') : (action.text as string) || '';
+                                text = `Pressing keys: ${keys}`;
+                                if (keys.includes('ENTER') || keys.includes('Enter')) {
+                                  reasoning = `Submitting the search query to find information about ${goal || 'the requested topic'}. This will execute the search and retrieve relevant results.`;
+                                } else {
+                                  reasoning = 'Using keyboard input to efficiently interact with the page. This keyboard interaction helps streamline the navigation process.';
+                                }
+                                break;
+                              case 'scroll':
+                                text = `Scrolling by (${(action.scroll_x as number) || 0}, ${(action.scroll_y as number) || 0})`;
+                                reasoning = `Scrolling to view additional content that might contain the requested information about ${goal || 'the topic'}. Scrolling allows examining more search results or content.`;
+                                break;
+                              case 'mouse_move':
+                              case 'move':
+                                text = `Moving cursor to position (${(action.x as number) || 0}, ${(action.y as number) || 0})`;
+                                reasoning = 'Positioning cursor to prepare for the next interaction. This helps with precise element selection.';
+                                break;
+                              case 'screenshot':
+                                text = 'Taking screenshot';
+                                reasoning = 'Taking a screenshot to capture the visual information displayed. This preserves the current state of the information for reference.';
+                                break;
+                              case 'double_click':
+                                text = `Double-clicking at position (${(action.x as number) || 0}, ${(action.y as number) || 0})`;
+                                reasoning = 'Double-clicking to interact with this element. Double-clicking often opens or expands content that may contain relevant information.';
+                                break;
+                              case 'drag':
+                                const pathArray = action.path as Array<{ x: number; y: number }> | undefined;
+                                const startX = pathArray?.[0]?.x || (action.x as number) || 0;
+                                const startY = pathArray?.[0]?.y || (action.y as number) || 0;
+                                const endX = pathArray?.[pathArray.length - 1]?.x || (action.x as number) || 0;
+                                const endY = pathArray?.[pathArray.length - 1]?.y || (action.y as number) || 0;
+                                text = `Dragging from (${startX}, ${startY}) to (${endX}, ${endY})`;
+                                reasoning = 'Dragging to adjust the view or interact with content. This helps reveal or organize information in a more useful way.';
+                                break;
+                              default:
+                                text = log.instruction || 'Computer action executed';
+                                reasoning = `Executing COMPUTER_USE action to progress in finding information about ${goal || 'the requested topic'}. This action is part of the automated workflow.`;
+                            }
+                          } else {
+                            // Fallback if no output is available
+                            text = log.instruction || 'Computer action executed';
+                            reasoning = `Executing COMPUTER_USE action to progress in finding information about ${goal || 'the requested topic'}. This action is part of the automated workflow.`;
+                          }
+                          break;
+                          
+                        default:
+                          text = log.instruction || `Performing ${toolUpper} action`;
+                          reasoning = `Executing ${toolUpper} action to progress in finding information about ${goal || 'the requested topic'}. This action is part of the process to retrieve the relevant data.`;
+                      }
+                      
+                      return {
+                        stepNumber: log.stepNumber,
+                        tool: toolUpper,
+                        text,
+                        reasoning
+                      };
+                    });
+                    
+                    // Filter out internal CUA actions that aren't useful to users
+                    const userFriendlySteps = formattedSteps.filter(step => {
+                      const tool = step.tool.toUpperCase();
+                      const text = step.text.toLowerCase();
+                      
+                      // Exclude screenshot steps - these are internal CUA actions
+                      if (tool === 'SCREENSHOT' || text.includes('taking screenshot')) {
+                        return false;
+                      }
+                      
+                      // Exclude mouse move steps - not meaningful to users
+                      if (tool === 'MOVE' || text.includes('moving cursor')) {
+                        return false;
+                      }
+                      
+                      // Include all other steps (clicks, typing, navigation, messages, etc.)
+                      return true;
+                    });
+                    
+                    setLiveSteps(userFriendlySteps);
+                  }
+                }
+              } catch (logError) {
+                console.error('Error fetching session logs:', logError);
+              }
+            } else {
+              // No running session - clear running session state and live steps
+              setRunningSession(prevSession => {
+                if (prevSession) {
+                  setLiveViewUrl(null);
+                  setLiveSteps([]);
+                  return null;
+                }
+                return prevSession;
+              });
+              // Don't clear isDeploying here - let it stay true until browser session is ready
+              // isDeploying will be cleared when browserSessionId is detected (line 137)
+              // or when user explicitly pauses the agent
+              // Also clear live steps even if there was no previous running session
+              setLiveSteps([]);
+            }
+          } else {
+            // No sessions in response - only update agent fields, preserve sessions/context
+            setAgent(prevAgent => ({
+              ...prevAgent,
+              ...data.agent,
+              // Explicitly preserve sessions and context from previous state
+              sessions: prevAgent.sessions,
+              context: prevAgent.context
+            }));
+          }
+          // If data.sessions is null/undefined, all session-related state is preserved
+        }
+        
+        // Fetch tasks
+        const tasksResponse = await fetch(`/api/agents/${agentId}/tasks`);
+        if (tasksResponse.ok) {
+          const tasksData = await tasksResponse.json();
+          setTasks(tasksData.tasks || []);
+        }
+      } catch (error) {
+        console.error('Error polling for updates:', error);
+      }
+    };
+
+    // Poll immediately on mount, then every 3 seconds
+    pollForUpdates();
+    const interval = setInterval(pollForUpdates, 3000);
+
+    return () => clearInterval(interval);
+  }, [agentId]);
+
+  const fetchLiveViewUrl = async (browserSessionId: string) => {
+    try {
+      const response = await fetch(`/api/browserbase/live-view/${browserSessionId}`);
+      if (response.ok) {
+        const data = await response.json();
+        setLiveViewUrl(data.liveViewUrl);
+      }
+    } catch (error) {
+      console.error('Error fetching live view URL:', error);
+    }
+  };
+
+  const handleToggleDeployment = async () => {
+    try {
+      // Stop if there's a browser session running (even if there was an error)
+      if (runningSession?.browserSessionId) {
+        setIsStopping(true); // Show stopping loader
+        const response = await fetch(`/api/agents/${agentId}/pause`, {
+          method: 'POST',
+        });
+        if (response.ok) {
+          setAgent({ ...agent, isDeployed: false });
+          setRunningSession(null);
+          setLiveViewUrl(null);
+          setIsDeploying(false);
+          setDeploymentStartTime(null);
+          // Navigate back to agents dashboard
+          router.push('/');
+        }
+        setIsStopping(false);
+      } else {
+        setIsDeploying(true); // Start loading state
+        setDeploymentStartTime(Date.now()); // Track deployment start time for timeout
+        setActiveTab('livepreview'); // Automatically switch to Live Preview tab
+        const response = await fetch(`/api/agents/${agentId}/deploy`, {
+          method: 'POST',
+        });
+        
+        // Don't clear isDeploying based on response - let polling handle it
+        // Polling will clear isDeploying when browser session is ready or when agent.isDeployed becomes false
+        if (response.ok) {
+          const data = await response.json();
+          // If we get session with browserSessionId immediately, set it up
+          if (data.session) {
+            setRunningSession(data.session);
+            if (data.session.browserSessionId) {
+              fetchLiveViewUrl(data.session.browserSessionId);
+              // isDeploying will be cleared by polling when it detects the session
+            }
+          }
+          // Otherwise, polling will detect and set up the session when ready
+        }
+        // Even on error, don't clear isDeploying here - polling will handle it
+        // by checking if agent.isDeployed is false
+      }
+    } catch (error) {
+      console.error("Error toggling deployment:", error);
+      // Don't clear isDeploying here - let polling handle it
+      // If deployment failed, agent.isDeployed will be false and polling will clear isDeploying
+    }
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "running": return "text-blue-400 bg-blue-500/20";
+      case "completed": return "text-green-400 bg-green-500/20";
+      case "failed": return "text-red-400 bg-red-500/20";
+      case "stopped": return "text-yellow-400 bg-yellow-500/20";
+      default: return "text-gray-400 bg-gray-500/20";
+    }
+  };
+
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case "running": return <Activity size={16} className="animate-pulse" />;
+      case "completed": return <CheckCircle size={16} />;
+      case "failed": return <XCircle size={16} />;
+      case "stopped": return <AlertCircle size={16} />;
+      default: return <Clock size={16} />;
+    }
+  };
+
+  if (selectedSession) {
+    return (
+      <SessionViewer
+        sessionId={selectedSession.id}
+        onBack={() => setSelectedSession(null)}
+        existingBrowserSessionId={selectedSession.browserSessionId || undefined}
+      />
+    );
+  }
+
+  if (showLiveExecution && runningSession && runningSession.browserSessionId && liveViewUrl) {
+    return (
+      <div className="fixed inset-0 bg-black z-50 flex flex-col">
+        <div className="p-4 border-b border-white/[0.08] bg-black/[0.6] backdrop-blur-xl flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => setShowLiveExecution(false)}
+              className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
+            >
+              <ArrowLeft size={20} />
+              <span>Back to Agent Details</span>
+            </button>
+            <div className="flex items-center gap-3">
+              <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+              <h3 className="text-lg font-semibold text-white">Live Execution: {agent?.name || 'Agent'}</h3>
+            </div>
+          </div>
+        </div>
+        <div className="flex-1 overflow-hidden">
+          <LivePreviewSplit
+            browserViewUrl={liveViewUrl}
+            sessionId={runningSession.id}
+            agentGoal={agent.description || `View execution of ${agent?.name || 'agent'}`}
+            steps={liveSteps}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-8 max-w-7xl mx-auto">
+      {/* Header */}
+      <div className="mb-8">
+        <button
+          onClick={() => router.push("/?view=agents")}
+          className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors mb-6"
+        >
+          <ArrowLeft size={20} />
+          Back to Agents
+        </button>
+
+        <div className="flex items-start justify-between">
+          <div className="flex-1">
+            <div className="flex items-center gap-4 mb-2">
+              <h1 className="text-3xl font-bold text-white">{agent.name}</h1>
+              <span className={`px-3 py-1 rounded-lg text-sm font-medium ${
+                agent.isDeployed ? "bg-green-500/20 text-green-400" : "bg-gray-500/20 text-gray-400"
+              }`}>
+                {agent.isDeployed ? "Deployed" : "Not Deployed"}
+              </span>
+            </div>
+            {agent.description && (
+              <p className="text-gray-400 text-lg mb-4">{agent.description}</p>
+            )}
+            <div className="flex items-center gap-6 text-sm text-gray-400">
+              <div className="flex items-center gap-2">
+                <Clock size={16} />
+                {agent.runtimePerDay} min/day
+              </div>
+              {agent.targetWebsite && (
+                <div className="flex items-center gap-2">
+                  <Globe size={16} />
+                  {agent.targetWebsite}
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <Calendar size={16} />
+                Created {new Date(agent.createdAt).toLocaleDateString()}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {runningSession && runningSession.browserSessionId && (
+              <button
+                onClick={() => setShowLiveExecution(true)}
+                className="flex items-center gap-2 px-6 py-3 rounded-xl bg-white/[0.05] hover:bg-white/[0.08] text-white transition-all duration-200 font-medium border border-white/[0.08] hover:border-white/[0.12]"
+              >
+                <Activity size={18} />
+                Watch Live
+              </button>
+            )}
+            <button
+              onClick={handleToggleDeployment}
+              disabled={isDeploying || isStopping}
+              className={`flex items-center gap-2 px-6 py-3 rounded-xl transition-all duration-200 font-medium ${
+                isDeploying || isStopping
+                  ? "bg-gray-600 cursor-not-allowed text-white"
+                  : runningSession?.browserSessionId
+                  ? "bg-red-600 hover:bg-red-700 text-white"
+                  : "bg-blue-600 hover:bg-blue-700 text-white"
+              }`}
+            >
+              {isStopping ? (
+                <>
+                  <Loader2 size={18} className="animate-spin" />
+                  Stopping Agent
+                </>
+              ) : isDeploying ? (
+                <>
+                  <Loader2 size={18} className="animate-spin" />
+                  Starting Agent
+                </>
+              ) : runningSession?.browserSessionId ? (
+                <>
+                  <Pause size={18} />
+                  Stop Agent
+                </>
+              ) : (
+                <>
+                  <Play size={18} />
+                  Run Agent
+                </>
+              )}
+            </button>
+            <button
+              className="p-3 bg-white/[0.05] hover:bg-white/[0.08] rounded-xl transition-all duration-200 text-gray-400 hover:text-white"
+              title="Settings"
+            >
+              <Settings size={18} />
+            </button>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="border-b border-white/[0.08] mb-6">
+          <div className="flex gap-6">
+            {[
+              { id: "overview", label: "Overview", icon: FileText },
+              { id: "livepreview", label: "Live Preview", icon: Monitor },
+              { id: "workflow", label: "Workflow", icon: CheckCircle },
+              { id: "sessions", label: "Sessions", icon: Activity },
+              { id: "memory", label: "Memory", icon: Brain },
+              { id: "audit", label: "Audit Logs", icon: Clock },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as TabType)}
+                className={`flex items-center gap-2 px-4 py-3 border-b-2 transition-all duration-200 ${
+                  activeTab === tab.id
+                    ? "border-blue-400 text-white"
+                    : "border-transparent text-gray-400 hover:text-white"
+                }`}
+              >
+                <tab.icon size={18} />
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Tab Content */}
+        <div className="space-y-6">
+          {activeTab === "overview" && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="space-y-6"
+            >
+              {/* System Prompt */}
+              <div className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-6">
+                <h3 className="text-lg font-semibold text-white mb-3">System Prompt</h3>
+                <p className="text-gray-300 whitespace-pre-wrap leading-relaxed">
+                  {agent.systemPrompt}
+                </p>
+              </div>
+
+              {/* Knowledge Base */}
+              {agent.knowledgeBase && (
+                <div className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-6">
+                  <h3 className="text-lg font-semibold text-white mb-3">Knowledge Base</h3>
+                  <p className="text-gray-300 whitespace-pre-wrap leading-relaxed">
+                    {agent.knowledgeBase}
+                  </p>
+                </div>
+              )}
+
+              {/* Quick Stats */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-6">
+                  <div className="flex items-center gap-3 mb-2">
+                    <Activity size={20} className="text-blue-400" />
+                    <h4 className="text-sm font-medium text-gray-400">Total Sessions</h4>
+                  </div>
+                  <p className="text-3xl font-bold text-white">{agent.sessions?.length || 0}</p>
+                </div>
+
+                <div className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-6">
+                  <div className="flex items-center gap-3 mb-2">
+                    <Brain size={20} className="text-purple-400" />
+                    <h4 className="text-sm font-medium text-gray-400">Memory Items</h4>
+                  </div>
+                  <p className="text-3xl font-bold text-white">{agent.context?.length || 0}</p>
+                </div>
+
+                <div className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-6">
+                  <div className="flex items-center gap-3 mb-2">
+                    <CheckCircle size={20} className="text-green-400" />
+                    <h4 className="text-sm font-medium text-gray-400">Success Rate</h4>
+                  </div>
+                  <p className="text-3xl font-bold text-white">
+                    {agent.sessions && agent.sessions.length > 0
+                      ? Math.round(
+                          (agent.sessions.filter((s) => s.status === "completed").length /
+                            agent.sessions.length) *
+                            100
+                        )
+                      : 0}%
+                  </p>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {activeTab === "livepreview" && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="space-y-4"
+            >
+              {runningSession && liveViewUrl ? (
+                <div className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.08] rounded-2xl overflow-hidden">
+                  <div className="p-4 border-b border-white/[0.08] bg-white/[0.02]">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+                        <h3 className="text-lg font-semibold text-white">Live Browser Session</h3>
+                        <span className="text-sm text-gray-400">Session #{runningSession.id}</span>
+                      </div>
+                      <div className="text-sm text-gray-400">
+                        1024 × 768
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ height: '600px' }}>
+                    <LivePreviewSplit
+                      browserViewUrl={liveViewUrl}
+                      sessionId={runningSession.id}
+                      agentGoal={agent.description || undefined}
+                      steps={liveSteps}
+                    />
+                  </div>
+                </div>
+              ) : agent.isDeployed || isDeploying ? (
+                <div className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-12 text-center">
+                  <div className="flex flex-col items-center justify-center space-y-6">
+                    <div className="relative">
+                      <Loader2 size={64} className="text-blue-500 animate-spin" />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <Monitor size={32} className="text-blue-400" />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-white text-xl font-semibold">Starting Agent...</p>
+                      <p className="text-gray-400">Initializing browser session and connecting to agent</p>
+                    </div>
+                    <div className="flex items-center gap-2 text-sm text-gray-500">
+                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+                      <span>This usually takes 5-10 seconds</span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-12 text-center">
+                  <Monitor size={64} className="mx-auto mb-4 text-gray-600" />
+                  <p className="text-gray-400 text-lg mb-2">AI Agent is not running currently</p>
+                  <p className="text-gray-500 text-sm">
+                    Deploy the agent to see the live browser automation in action
+                  </p>
+                </div>
+              )}
+            </motion.div>
+          )}
+
+          {activeTab === "workflow" && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <WorkflowPlan 
+                executionPrompt={agent.executionPrompt}
+                agentName={agent.name}
+              />
+            </motion.div>
+          )}
+
+          {activeTab === "sessions" && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="space-y-4"
+            >
+              {!agent.sessions || agent.sessions.length === 0 ? (
+                <div className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-12 text-center">
+                  <p className="text-gray-400 text-lg">No sessions yet</p>
+                  <p className="text-gray-500 text-sm mt-2">
+                    Sessions will appear here when the agent runs
+                  </p>
+                </div>
+              ) : (
+                agent.sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    onClick={() => setSelectedSession(session)}
+                    className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-6 hover:border-white/[0.12] transition-all duration-200 cursor-pointer"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-3 mb-2">
+                          <span className={`px-3 py-1 rounded-lg text-sm font-medium flex items-center gap-2 ${getStatusColor(session.status)}`}>
+                            {getStatusIcon(session.status)}
+                            {session.status}
+                          </span>
+                          <span className="text-gray-400 text-sm">
+                            Session #{session.id}
+                          </span>
+                        </div>
+                        {session.summary && (
+                          <p className="text-gray-300 mb-3">{session.summary}</p>
+                        )}
+                        <div className="flex items-center gap-6 text-sm text-gray-400">
+                          <div className="flex items-center gap-2">
+                            <Calendar size={14} />
+                            {new Date(session.startedAt).toLocaleString()}
+                          </div>
+                          {session.completedAt && (
+                            <div className="flex items-center gap-2">
+                              <Clock size={14} />
+                              Duration: {Math.round((new Date(session.completedAt).getTime() - new Date(session.startedAt).getTime()) / 1000 / 60)}m
+                            </div>
+                          )}
+                          {(session.totalSteps != null && session.totalSteps > 0) && (
+                            <div className="flex items-center gap-2">
+                              <Activity size={14} />
+                              {session.totalSteps} steps
+                            </div>
+                          )}
+                        </div>
+                        {session.errorMessage && (
+                          <div className="mt-3 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
+                            <p className="text-red-400 text-sm">{session.errorMessage}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </motion.div>
+          )}
+
+          {activeTab === "memory" && (
+            <MemoryViewer 
+              agentId={agentId} 
+              contextItems={agent.context || []} 
+              onUpdate={() => router.refresh()}
+            />
+          )}
+
+          {activeTab === "audit" && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <AuditLogsViewer agentId={agentId} />
+            </motion.div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

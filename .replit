@@ -1,0 +1,100 @@
+modules = ["nodejs-20", "web", "postgresql-16"]
+[agent]
+expertMode = true
+integrations = ["javascript_database:1.0.0"]
+
+[nix]
+channel = "stable-25_05"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Next.js Dev Server"
+
+[[workflows.workflow]]
+name = "Next.js Dev Server"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run dev"
+waitForPort = 5000
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 35083
+externalPort = 6000
+
+[[ports]]
+localPort = 35477
+externalPort = 8080
+
+[[ports]]
+localPort = 35721
+externalPort = 9000
+
+[[ports]]
+localPort = 37075
+externalPort = 3001
+
+[[ports]]
+localPort = 37525
+externalPort = 5000
+
+[[ports]]
+localPort = 38105
+externalPort = 8000
+
+[[ports]]
+localPort = 40033
+externalPort = 4200
+
+[[ports]]
+localPort = 41935
+externalPort = 8099
+
+[[ports]]
+localPort = 42877
+externalPort = 8081
+
+[[ports]]
+localPort = 43485
+externalPort = 3003
+
+[[ports]]
+localPort = 44275
+externalPort = 5173
+
+[[ports]]
+localPort = 44389
+externalPort = 3002
+
+[[ports]]
+localPort = 44427
+externalPort = 6800
+
+[[ports]]
+localPort = 44447
+externalPort = 3000
+
+[[ports]]
+localPort = 45649
+externalPort = 8008
+
+[deployment]
+deploymentTarget = "autoscale"
+run = ["npm", "run", "start"]
+build = ["npm", "run", "build"]
