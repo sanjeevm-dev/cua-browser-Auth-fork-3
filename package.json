@@ -14,6 +14,7 @@
     "@ai-sdk/openai": "^1.1.2",
     "@ai-sdk/provider": "^1.0.6",
     "@browserbasehq/sdk": "^2.0.0",
+    "@browserbasehq/stagehand": "^2.5.2",
     "@clerk/nextjs": "^6.33.7",
     "@types/mongoose": "^5.11.96",
     "@types/ws": "^8.18.1",
