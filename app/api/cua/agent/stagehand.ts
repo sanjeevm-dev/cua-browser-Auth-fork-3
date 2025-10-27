@@ -1,5 +1,19 @@
 import { Stagehand } from "@browserbasehq/stagehand";
-import { z } from "zod";
+import type {
+  ConstructorParams,
+  ActOptions,
+  ObserveResult,
+  ExtractOptions,
+  InitResult,
+  Page,
+  Browser,
+  BrowserContext,
+  AgentConfig,
+  ClientOptions,
+  ActResult,
+  AgentResult,
+} from "@browserbasehq/stagehand";
+import type { AnyZodObject } from "zod";
 
 export class StagehandBrowser {
   private stagehand: Stagehand | null = null;
@@ -24,123 +38,114 @@ export class StagehandBrowser {
     this.modelApiKey = modelApiKey || process.env.OPENAI_API_KEY || null;
   }
 
-  async init(): Promise<{ sessionId: string; sessionUrl: string; debugUrl: string }> {
-    const config: {
-      env: "BROWSERBASE";
-      apiKey: string;
-      projectId: string;
-      enableCaching: boolean;
-      modelName: string;
-      modelClientOptions?: { apiKey: string };
-      browserbaseSessionId?: string;
-    } = {
-      env: "BROWSERBASE" as const,
+  async init(): Promise<InitResult> {
+    const config: ConstructorParams = {
+      env: "BROWSERBASE",
       apiKey: this.apiKey,
       projectId: this.projectId,
       enableCaching: this.enableCaching,
       modelName: this.modelName,
+      ...(this.modelApiKey
+        ? ({ modelClientOptions: { apiKey: this.modelApiKey } as ClientOptions } as ConstructorParams)
+        : {}),
+      ...(this.sessionId ? ({ browserbaseSessionID: this.sessionId } as ConstructorParams) : {}),
     };
 
-    if (this.modelApiKey) {
-      config.modelClientOptions = {
-        apiKey: this.modelApiKey,
-      };
-    }
+    this.stagehand = new Stagehand(config);
 
-    if (this.sessionId) {
-      config.browserbaseSessionId = this.sessionId;
-    }
-
-    this.stagehand = new Stagehand(config as any);
-    
     const result = await this.stagehand.init();
-    
+    this.sessionId = result.sessionId;
     return result;
   }
 
-  async act(action: string | any): Promise<any> {
+  async act(action: string | ActOptions | ObserveResult): Promise<ActResult> {
     if (!this.stagehand?.page) {
       throw new Error("Stagehand not initialized. Call init() first.");
     }
 
-    const actionStr = typeof action === 'string' ? action : action.action || action.description || 'action';
-    console.log(`🎬 Stagehand ACT: ${actionStr}`);
-    
-    if (typeof action === 'string') {
+    const actionStr =
+      typeof action === "string"
+        ? action
+        : (action as ActOptions).action || "action";
+    console.log(`Stagehand ACT: ${actionStr}`);
+
+    if (typeof action === "string") {
       const result = await this.stagehand.page.act(action);
-      console.log(`✅ ACT complete:`, result);
+      console.log(`ACT complete:`, result);
       return result;
     }
-    
-    const result = await this.stagehand.page.act(action as any);
-    console.log(`✅ ACT complete:`, result);
+
+    const result =
+      "action" in (action as ActOptions)
+        ? await this.stagehand.page.act(action as ActOptions)
+        : await this.stagehand.page.act(action as ObserveResult);
+    console.log(`ACT complete:`, result);
     return result;
   }
 
-  async extract(instructionOrOptions?: string | any): Promise<any> {
+  async extract(
+    instructionOrOptions?: string | ExtractOptions<AnyZodObject>
+  ) {
     if (!this.stagehand?.page) {
       throw new Error("Stagehand not initialized. Call init() first.");
     }
 
     if (!instructionOrOptions) {
-      console.log(`📊 Stagehand EXTRACT: page text`);
+      console.log(`Stagehand EXTRACT: page text`);
       const result = await this.stagehand.page.extract();
-      console.log(`✅ EXTRACT complete`);
+      console.log(`EXTRACT complete`);
       return result;
     }
 
-    if (typeof instructionOrOptions === 'string') {
-      console.log(`📊 Stagehand EXTRACT: ${instructionOrOptions}`);
+    if (typeof instructionOrOptions === "string") {
+      console.log(`Stagehand EXTRACT: ${instructionOrOptions}`);
       const result = await this.stagehand.page.extract(instructionOrOptions);
-      console.log(`✅ EXTRACT complete:`, result);
+      console.log(`EXTRACT complete:`, result);
       return result;
     }
 
-    console.log(`📊 Stagehand EXTRACT: ${instructionOrOptions.instruction || 'data'}`);
-    const result = await this.stagehand.page.extract(instructionOrOptions as any);
-    console.log(`✅ EXTRACT complete:`, result);
+    console.log(
+      `Stagehand EXTRACT: ${instructionOrOptions.instruction || "data"}`
+    );
+    const result = await this.stagehand.page.extract(
+      instructionOrOptions as ExtractOptions<AnyZodObject>
+    );
+    console.log(`EXTRACT complete:`, result);
     return result;
   }
 
-  async observe(instruction?: string): Promise<any> {
+  async observe(instruction?: string): Promise<ObserveResult[]> {
     if (!this.stagehand?.page) {
       throw new Error("Stagehand not initialized. Call init() first.");
     }
 
-    console.log(`👀 Stagehand OBSERVE: ${instruction || "page elements"}`);
-    
+    console.log(`Stagehand OBSERVE: ${instruction || "page elements"}`);
+
     if (instruction) {
       const result = await this.stagehand.page.observe(instruction);
-      console.log(`✅ OBSERVE complete:`, result);
+      console.log(`OBSERVE complete:`, result);
       return result;
     }
-    
+
     const result = await this.stagehand.page.observe();
-    console.log(`✅ OBSERVE complete:`, result);
+    console.log(`OBSERVE complete:`, result);
     return result;
   }
 
   async runAgent(
     instructions: string,
-    options?: {
-      modelName?: string;
-      modelClientOptions?: any;
-      domSettleTimeoutMs?: number;
-    }
-  ): Promise<any> {
+    options?: AgentConfig
+  ): Promise<AgentResult> {
     if (!this.stagehand) {
       throw new Error("Stagehand not initialized. Call init() first.");
     }
 
-    console.log(`🤖 Stagehand AGENT: ${instructions}`);
-    
-    const agent = await this.stagehand.agent({
-      instructions,
-      ...options,
-    });
+    console.log(`Stagehand AGENT: ${instructions}`);
+
+    const agent = await this.stagehand.agent({ instructions, ...options });
 
     const result = await agent.execute(instructions);
-    console.log(`✅ AGENT complete:`, result);
+    console.log(`AGENT complete:`, result);
     return result;
   }
 
@@ -148,7 +153,7 @@ export class StagehandBrowser {
     if (!this.stagehand?.page) {
       throw new Error("Stagehand not initialized. Call init() first.");
     }
-    console.log(`🌐 Navigating to: ${url}`);
+    console.log(`Navigating to: ${url}`);
     await this.stagehand.page.goto(url);
   }
 
@@ -157,30 +162,31 @@ export class StagehandBrowser {
       throw new Error("Stagehand not initialized. Call init() first.");
     }
     const buffer = await this.stagehand.page.screenshot({ fullPage: false });
-    return buffer.toString('base64');
+    return buffer.toString("base64");
   }
 
   async close(): Promise<void> {
     if (this.stagehand) {
-      console.log("🔒 Closing Stagehand session");
+      console.log("Closing Stagehand session");
       await this.stagehand.close();
       this.stagehand = null;
     }
   }
 
   getSessionId(): string | null {
-    return (this.stagehand as any)?.browserbaseSessionId || this.sessionId;
+    return this.sessionId;
   }
 
-  getPage() {
-    return this.stagehand?.page || null;
+  getPage(): Page | null {
+    return this.stagehand?.page ?? null;
   }
 
-  getContext() {
-    return this.stagehand?.context || null;
+  getContext(): BrowserContext | null {
+    return this.stagehand?.context ?? null;
   }
 
-  getBrowser() {
-    return this.stagehand?.context?.browser() || null;
+  getBrowser(): Browser | null {
+    return this.stagehand?.context?.browser() ?? null;
   }
 }
+

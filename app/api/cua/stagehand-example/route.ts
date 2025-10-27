@@ -41,7 +41,7 @@ export async function POST(request: Request) {
     const initResult = await stagehand.init();
     console.log('Stagehand initialized:', initResult);
 
-    let result: any;
+    let result: unknown;
 
     switch (action) {
       case 'act':
